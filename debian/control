@@ -1,0 +1,33 @@
+Source: libimagequant
+Priority: optional
+Maintainer: Maintainer: Debian PhotoTools Maintainers <pkg-phototools-devel@lists.alioth.debian.org>
+Uploaders: Herbert Parentes Fortes Neto <hpfn@debian.org>
+Build-Depends: debhelper (>= 11)
+Standards-Version: 4.1.4
+Section: libs
+Homepage: https://github.com/ImageOptim/libimagequant
+Vcs-Git: https://salsa.debian.org/debian-phototools-team/libimagequant.git
+Vcs-Browser: https://salsa.debian.org/debian-phototools-team/libimagequant
+
+Package: libimagequant-dev
+Section: libdevel
+Architecture: any
+Multi-Arch: same
+Depends: libimagequant0 (= ${binary:Version}), ${misc:Depends}
+Description: Palette quantization library (development files)
+ Small, portable C library for high-quality conversion of RGBA
+ images to 8-bit indexed-color (palette) images.
+ .
+ This library powers pngquant and other PNG optimizers.
+ .
+ This package contains the development files.
+
+Package: libimagequant0
+Architecture: any
+Multi-Arch: same
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Palette quantization library
+ Small, portable C library for high-quality conversion of RGBA
+ images to 8-bit indexed-color (palette) images.
+ .
+ This library powers pngquant and other PNG optimizers.

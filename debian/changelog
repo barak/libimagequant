@@ -1,0 +1,5 @@
+libimagequant (2.11.10-1) unstable; urgency=medium
+
+  * Initial release (Closes: #895295)
+
+ -- Herbert Parentes Fortes Neto <hpfn@debian.org>  Sat, 07 Apr 2018 12:59:00 -0300

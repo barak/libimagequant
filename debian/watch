@@ -1,0 +1,19 @@
+version=4
+
+# GitHub hosted projects
+#opts="filenamemangle=s%(?:.*?)?v?(\d[\d.]*)\.tar\.gz%<project>-$1.tar.gz%" \
+https://github.com/ImageOptim/libimagequant/tags \
+(?:.*?/)?v?(\d[\d.]*)\.tar\.gz debian uupdate
+
+# PyPI
+# https://pypi.debian.net/libimagequant/libimagequant-(.+)\.(?:zip|tgz|tbz|txz|(?:tar\.(?:gz|bz2|xz)))
+
+# Direct Git
+# opts="mode=git" http://git.example.com/libimagequant.git \
+#   refs/tags/v([\d\.]+) debian uupdate
+
+
+
+
+# Uncomment to find new files on GooglePages
+# http://example.googlepages.com/foo.html libimagequant-(.*)\.tar\.gz
