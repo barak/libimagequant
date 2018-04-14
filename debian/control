@@ -1,6 +1,6 @@
 Source: libimagequant
 Priority: optional
-Maintainer: Maintainer: Debian PhotoTools Maintainers <pkg-phototools-devel@lists.alioth.debian.org>
+Maintainer: Debian PhotoTools Maintainers <pkg-phototools-devel@lists.alioth.debian.org>
 Uploaders: Herbert Parentes Fortes Neto <hpfn@debian.org>
 Build-Depends: debhelper (>= 11)
 Standards-Version: 4.1.4
