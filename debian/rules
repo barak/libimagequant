@@ -2,15 +2,35 @@
 
 #export DH_VERBOSE = 1
 
+DEB_HOST_MULTIARCH ?= $(shell dpkg-architecture -qDEB_HOST_MULTIARCH)
+Debian_libimagequant0=debian/libimagequant0/usr/lib/$(DEB_HOST_MULTIARCH)/
+Debian_libimagequant_dev=debian/libimagequant-dev/usr/lib/$(DEB_HOST_MULTIARCH)/
+Debian_Tmp=debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/
+
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
-#export DEB_CFLAGS_MAINT_APPEND  = -Wall -pedantic
-#export DEB_LDFLAGS_MAINT_APPEND = -Wl,--as-needed
 export DEB_CFLAGS_MAINT_APPEND=-D_FORTIFY_SOURCE=2
 
 
 %:
 	dh $@
 
+override_dh_auto_configure:
+	dh_auto_configure -- \
+		--prefix=/usr --libdir=/usr/lib/$(DEB_HOST_MULTIARCH)
+
+
+
 override_dh_auto_build:
 	dh_auto_build -- libimagequant.so
+	sed -i "s#^prefix=/usr#prefix=#" imagequant.pc
+	sed -i "s#^Version: 2.11.10#Version: #" imagequant.pc
+
+override_dh_install:
+	dh_install
+	mkdir -p $(Debian_libimagequant0)
+	mkdir -p $(Debian_libimagequant_dev)
+	mv $(Debian_Tmp)libimagequant.so.0 $(Debian_libimagequant0)
+	mv $(Debian_Tmp)libimagequant.so $(Debian_libimagequant_dev)
+	mv $(Debian_Tmp)pkgconfig $(Debian_libimagequant_dev)
+	chmod -x $(Debian_libimagequant_dev)pkgconfig/imagequant.pc
 

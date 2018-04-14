@@ -1,5 +1,3 @@
-libimagequant.so usr/lib/*/
-imagequant.pc usr/lib/*/pkgconfig/
 blur.h usr/include/libimagequant/ 
 kmeans.h usr/include/libimagequant/
 libimagequant.h usr/include/libimagequant/
