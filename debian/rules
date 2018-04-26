@@ -22,8 +22,6 @@ override_dh_auto_configure:
 
 override_dh_auto_build:
 	dh_auto_build -- libimagequant.so
-	sed -i "s#^prefix=/usr#prefix=#" imagequant.pc
-	sed -i "s#^Version: 2.11.10#Version: #" imagequant.pc
 
 override_dh_install:
 	dh_install
@@ -34,3 +32,7 @@ override_dh_install:
 	mv $(Debian_Tmp)pkgconfig $(Debian_libimagequant_dev)
 	chmod -x $(Debian_libimagequant_dev)pkgconfig/imagequant.pc
 
+override_dh_clean:
+	dh_clean
+	sed -i "s#^prefix=/usr#prefix=#" imagequant.pc
+	sed -i "s#^Version: 2.11.10#Version: #" imagequant.pc
