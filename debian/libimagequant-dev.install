@@ -1,7 +1,0 @@
-blur.h usr/include/libimagequant/ 
-kmeans.h usr/include/libimagequant/
-libimagequant.h usr/include/libimagequant/
-mediancut.h usr/include/libimagequant/
-mempool.h usr/include/libimagequant/
-nearest.h usr/include/libimagequant/
-pam.h usr/include/libimagequant/
