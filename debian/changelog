@@ -1,3 +1,9 @@
+libimagequant (2.12.2-1) UNRELEASED; urgency=medium
+
+  * New upstream version
+
+ -- Andreas Tille <tille@debian.org>  Wed, 05 Dec 2018 15:12:33 +0100
+
 libimagequant (2.12.1-1) unstable; urgency=medium
 
   * Initial release (Closes: #908278)
