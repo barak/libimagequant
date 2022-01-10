@@ -54,7 +54,6 @@ struct liq_attr {
     void (*free)(void*);
 
     double target_mse, max_mse, kmeans_iteration_limit;
-    float min_opaque_val;
     unsigned int max_colors, max_histogram_entries;
     unsigned int min_posterization_output /* user setting */, min_posterization_input /* speed setting */;
     unsigned int kmeans_iterations, feedback_loop_trials;
@@ -87,7 +86,6 @@ struct liq_image {
     liq_image_get_rgba_row_callback *row_callback;
     void *row_callback_user_info;
     liq_image *background;
-    float min_opaque_val;
     f_pixel fixed_colors[256];
     unsigned short fixed_colors_count;
     bool free_pixels, free_rows, free_rows_internal;
@@ -140,7 +138,6 @@ struct liq_histogram {
     bool had_image_added;
 };
 
-static void modify_alpha(liq_image *input_image, rgba_pixel *const row_pixels) LIQ_NONNULL;
 static void contrast_maps(liq_image *image) LIQ_NONNULL;
 static liq_error finalize_histogram(liq_histogram *input_hist, liq_attr *options, histogram **hist_output) LIQ_NONNULL;
 static const rgba_pixel *liq_image_get_row_rgba(liq_image *input_image, unsigned int row) LIQ_NONNULL;
@@ -384,18 +381,12 @@ LIQ_EXPORT LIQ_NONNULL liq_error liq_set_output_gamma(liq_result* res, double ga
 
 LIQ_EXPORT LIQ_NONNULL liq_error liq_set_min_opacity(liq_attr* attr, int min)
 {
-    if (!CHECK_STRUCT_TYPE(attr, liq_attr)) return LIQ_INVALID_POINTER;
-    if (min < 0 || min > 255) return LIQ_VALUE_OUT_OF_RANGE;
-
-    attr->min_opaque_val = (double)min/255.0;
     return LIQ_OK;
 }
 
 LIQ_EXPORT LIQ_NONNULL int liq_get_min_opacity(const liq_attr *attr)
 {
-    if (!CHECK_STRUCT_TYPE(attr, liq_attr)) return -1;
-
-    return MIN(255.f, 256.f * attr->min_opaque_val);
+    return 0;
 }
 
 LIQ_EXPORT LIQ_NONNULL void liq_set_last_index_transparent(liq_attr* attr, int is_last)
@@ -510,7 +501,6 @@ LIQ_EXPORT liq_attr* liq_attr_create_with_allocator(void* (*custom_malloc)(size_
         .malloc = custom_malloc,
         .free = custom_free,
         .max_colors = 256,
-        .min_opaque_val = 1, // whether preserve opaque colors for IE (1.0=no, does not affect alpha)
         .last_index_transparent = false, // puts transparent color at last index. This is workaround for blu-ray subtitles.
         .target_mse = 0,
         .max_mse = MAX_DIFF,
@@ -566,7 +556,7 @@ LIQ_NONNULL static bool liq_image_use_low_memory(liq_image *img)
 
 LIQ_NONNULL static bool liq_image_should_use_low_memory(liq_image *img, const bool low_memory_hint)
 {
-    return img->width * img->height > (low_memory_hint ? LIQ_HIGH_MEMORY_LIMIT/8 : LIQ_HIGH_MEMORY_LIMIT) / sizeof(f_pixel); // Watch out for integer overflow
+    return (size_t)img->width * (size_t)img->height > (low_memory_hint ? LIQ_HIGH_MEMORY_LIMIT/8 : LIQ_HIGH_MEMORY_LIMIT) / sizeof(f_pixel); // Watch out for integer overflow
 }
 
 static liq_image *liq_image_create_internal(const liq_attr *attr, rgba_pixel* rows[], liq_image_get_rgba_row_callback *row_callback, void *row_callback_user_info, int width, int height, double gamma)
@@ -592,10 +582,9 @@ static liq_image *liq_image_create_internal(const liq_attr *attr, rgba_pixel* ro
         .rows = rows,
         .row_callback = row_callback,
         .row_callback_user_info = row_callback_user_info,
-        .min_opaque_val = attr->min_opaque_val,
     };
 
-    if (!rows || attr->min_opaque_val < 1.f) {
+    if (!rows) {
         img->temp_row = attr->malloc(sizeof(img->temp_row[0]) * LIQ_TEMP_ROW_WIDTH(width) * omp_get_max_threads());
         if (!img->temp_row) return NULL;
     }
@@ -604,10 +593,6 @@ static liq_image *liq_image_create_internal(const liq_attr *attr, rgba_pixel* ro
     if (liq_image_should_use_low_memory(img, !img->temp_row && !attr->use_contrast_maps && !attr->use_dither_map)) {
         verbose_print(attr, "  conserving memory");
         if (!liq_image_use_low_memory(img)) return NULL;
-    }
-
-    if (img->min_opaque_val < 1.f) {
-        verbose_print(attr, "  Working around IE6 bug by making image less transparent...");
     }
 
     return img;
@@ -641,13 +626,14 @@ LIQ_EXPORT LIQ_NONNULL liq_error liq_image_set_memory_ownership(liq_image *img, 
 }
 
 LIQ_NONNULL static void liq_image_free_maps(liq_image *input_image);
+LIQ_NONNULL static void liq_image_free_dither_map(liq_image *input_image);
 LIQ_NONNULL static void liq_image_free_importance_map(liq_image *input_image);
 
 LIQ_EXPORT LIQ_NONNULL liq_error liq_image_set_importance_map(liq_image *img, unsigned char importance_map[], size_t buffer_size, enum liq_ownership ownership) {
     if (!CHECK_STRUCT_TYPE(img, liq_image)) return LIQ_INVALID_POINTER;
     if (!CHECK_USER_POINTER(importance_map)) return LIQ_INVALID_POINTER;
 
-    const size_t required_size = img->width * img->height;
+    const size_t required_size = (size_t)img->width * (size_t)img->height;
     if (buffer_size < required_size) {
         return LIQ_BUFFER_TOO_SMALL;
     }
@@ -686,7 +672,7 @@ LIQ_EXPORT LIQ_NONNULL liq_error liq_image_set_background(liq_image *img, liq_im
     }
 
     img->background = background;
-    liq_image_free_maps(img); // Force them to be re-analyzed with the background
+    liq_image_free_dither_map(img); // Force it to be re-analyzed with the background
 
     return LIQ_OK;
 }
@@ -779,9 +765,7 @@ LIQ_NONNULL inline static bool liq_image_has_rgba_pixels(const liq_image *img)
 LIQ_NONNULL inline static bool liq_image_can_use_rgba_rows(const liq_image *img)
 {
     assert(liq_image_has_rgba_pixels(img));
-
-    const bool iebug = img->min_opaque_val < 1.f;
-    return (img->rows && !iebug);
+    return img->rows;
 }
 
 LIQ_NONNULL static const rgba_pixel *liq_image_get_row_rgba(liq_image *img, unsigned int row)
@@ -798,7 +782,6 @@ LIQ_NONNULL static const rgba_pixel *liq_image_get_row_rgba(liq_image *img, unsi
         liq_executing_user_callback(img->row_callback, (liq_color*)temp_row, row, img->width, img->row_callback_user_info);
     }
 
-    if (img->min_opaque_val < 1.f) modify_alpha(img, temp_row);
     return temp_row;
 }
 
@@ -866,7 +849,16 @@ LIQ_EXPORT LIQ_NONNULL int liq_image_get_height(const liq_image *input_image)
 
 typedef void free_func(void*);
 
-LIQ_NONNULL static free_func *get_default_free_func(liq_image *img)
+LIQ_NONNULL static free_func *get_default_image_free_func(liq_image *img)
+{
+    // When default allocator is used then user-supplied pointers must be freed with free()
+    if (img->free != liq_aligned_free) {
+        return img->free;
+    }
+    return free;
+}
+
+LIQ_NONNULL static free_func *get_default_rows_free_func(liq_image *img)
 {
     // When default allocator is used then user-supplied pointers must be freed with free()
     if (img->free_rows_internal || img->free != liq_aligned_free) {
@@ -878,12 +870,12 @@ LIQ_NONNULL static free_func *get_default_free_func(liq_image *img)
 LIQ_NONNULL static void liq_image_free_rgba_source(liq_image *input_image)
 {
     if (input_image->free_pixels && input_image->pixels) {
-        get_default_free_func(input_image)(input_image->pixels);
+        get_default_image_free_func(input_image)(input_image->pixels);
         input_image->pixels = NULL;
     }
 
     if (input_image->free_rows && input_image->rows) {
-        get_default_free_func(input_image)(input_image->rows);
+        get_default_rows_free_func(input_image)(input_image->rows);
         input_image->rows = NULL;
     }
 }
@@ -902,7 +894,10 @@ LIQ_NONNULL static void liq_image_free_maps(liq_image *input_image) {
         input_image->free(input_image->edges);
         input_image->edges = NULL;
     }
+    liq_image_free_dither_map(input_image);
+}
 
+LIQ_NONNULL static void liq_image_free_dither_map(liq_image *input_image) {
     if (input_image->dither_map) {
         input_image->free(input_image->dither_map);
         input_image->dither_map = NULL;
@@ -986,6 +981,7 @@ LIQ_EXPORT LIQ_NONNULL liq_error liq_image_quantize(liq_image *const img, liq_at
     }
     liq_error err = liq_histogram_add_image(hist, attr, img);
     if (LIQ_OK != err) {
+        liq_histogram_destroy(hist);
         return err;
     }
 
@@ -1030,7 +1026,7 @@ LIQ_EXPORT LIQ_NONNULL liq_error liq_set_dithering_level(liq_result *res, float 
         res->remapping = NULL;
     }
 
-    if (res->dither_level < 0 || res->dither_level > 1.0f) return LIQ_VALUE_OUT_OF_RANGE;
+    if (dither_level < 0 || dither_level > 1.0f) return LIQ_VALUE_OUT_OF_RANGE;
     res->dither_level = dither_level;
     return LIQ_OK;
 }
@@ -1269,30 +1265,43 @@ LIQ_NONNULL static float remap_to_palette(liq_image *const input_image, unsigned
     const colormap_item *acolormap = map->palette;
 
     struct nearest_map *const n = nearest_init(map);
-    const int transparent_index = input_image->background ? nearest_search(n, &(f_pixel){0,0,0,0}, 0, NULL) : 0;
+    liq_image *background = input_image->background;
+    const int transparent_index = background ? nearest_search(n, &(f_pixel){0,0,0,0}, 0, NULL) : -1;
+    if (background && acolormap[transparent_index].acolor.a > 1.f/256.f) {
+        // palette unsuitable for using the bg
+        background = NULL;
+    }
 
 
     const unsigned int max_threads = omp_get_max_threads();
     LIQ_ARRAY(kmeans_state, average_color, (KMEANS_CACHE_LINE_GAP+map->colors) * max_threads);
     kmeans_init(map, max_threads, average_color);
 
+#if __GNUC__ >= 9 || __clang__
     #pragma omp parallel for if (rows*cols > 3000) \
-        schedule(static) default(none) shared(acolormap) shared(average_color) reduction(+:remapping_error)
+        schedule(static) default(none) shared(background,acolormap,average_color,cols,input_image,map,n,output_pixels,rows,transparent_index) reduction(+:remapping_error)
+#endif
     for(int row = 0; row < rows; ++row) {
         const f_pixel *const row_pixels = liq_image_get_row_f(input_image, row);
-        const f_pixel *const bg_pixels = input_image->background && acolormap[transparent_index].acolor.a < 1.f/256.f ? liq_image_get_row_f(input_image->background, row) : NULL;
+        const f_pixel *const bg_pixels = background && acolormap[transparent_index].acolor.a < 1.f/256.f ? liq_image_get_row_f(background, row) : NULL;
 
         unsigned int last_match=0;
         for(unsigned int col = 0; col < cols; ++col) {
             float diff;
             last_match = nearest_search(n, &row_pixels[col], last_match, &diff);
-            if (bg_pixels && colordifference(bg_pixels[col], acolormap[last_match].acolor) <= diff) {
-                last_match = transparent_index;
+            if (bg_pixels) {
+                float bg_diff = colordifference(bg_pixels[col], acolormap[last_match].acolor);
+                if (bg_diff <= diff) {
+                    diff = bg_diff;
+                    last_match = transparent_index;
+                }
             }
             output_pixels[row][col] = last_match;
 
             remapping_error += diff;
-            kmeans_update_color(row_pixels[col], 1.0, map, last_match, omp_get_thread_num(), average_color);
+            if (last_match != transparent_index) {
+                kmeans_update_color(row_pixels[col], 1.0, map, last_match, omp_get_thread_num(), average_color);
+            }
         }
     }
 
@@ -1374,7 +1383,12 @@ LIQ_NONNULL static bool remap_to_palette_floyd(liq_image *input_image, unsigned 
 
     bool ok = true;
     struct nearest_map *const n = nearest_init(map);
-    const int transparent_index = input_image->background ? nearest_search(n, &(f_pixel){0,0,0,0}, 0, NULL) : 0;
+    liq_image *background = input_image->background;
+    const int transparent_index = background ? nearest_search(n, &(f_pixel){0,0,0,0}, 0, NULL) : -1;
+    if (background && acolormap[transparent_index].acolor.a > 1.f/256.f) {
+        // palette unsuitable for using the bg
+        background = NULL;
+    }
 
     // response to this value is non-linear and without it any value < 0.8 would give almost no dithering
     float base_dithering_level = quant->dither_level;
@@ -1397,7 +1411,8 @@ LIQ_NONNULL static bool remap_to_palette_floyd(liq_image *input_image, unsigned 
 
         int col = (fs_direction > 0) ? 0 : (cols - 1);
         const f_pixel *const row_pixels = liq_image_get_row_f(input_image, row);
-        const f_pixel *const bg_pixels = input_image->background && acolormap[transparent_index].acolor.a < 1.f/256.f ? liq_image_get_row_f(input_image->background, row) : NULL;
+        const f_pixel *const bg_pixels = background && acolormap[transparent_index].acolor.a < 1.f/256.f ? liq_image_get_row_f(background, row) : NULL;
+        int undithered_bg_used = 0;
 
         do {
             float dither_level = base_dithering_level;
@@ -1408,15 +1423,41 @@ LIQ_NONNULL static bool remap_to_palette_floyd(liq_image *input_image, unsigned 
             const f_pixel spx = get_dithered_pixel(dither_level, max_dither_error, thiserr[col + 1], row_pixels[col]);
 
             const unsigned int guessed_match = output_image_is_remapped ? output_pixels[row][col] : last_match;
-            float diff;
-            last_match = nearest_search(n, &spx, guessed_match, &diff);
+            float dither_diff;
+            last_match = nearest_search(n, &spx, guessed_match, &dither_diff);
             f_pixel output_px = acolormap[last_match].acolor;
-            if (bg_pixels && colordifference(bg_pixels[col], output_px) <= diff) {
-                output_px = bg_pixels[col];
-                output_pixels[row][col] = transparent_index;
-            } else {
-                output_pixels[row][col] = last_match;
+            // this is for animgifs
+            if (bg_pixels) {
+                // if the background makes better match *with* dithering, it's a definitive win
+                float bg_for_dither_diff = colordifference(spx, bg_pixels[col]);
+                if (bg_for_dither_diff <= dither_diff) {
+                    output_px = bg_pixels[col];
+                    last_match = transparent_index;
+                } else if (undithered_bg_used > 1) {
+                    // the undithered fallback can cause artifacts when too many undithered pixels accumulate a big dithering error
+                    // so periodically ignore undithered fallback to prevent that
+                    undithered_bg_used = 0;
+                } else {
+                    // if dithering is not applied, there's a high risk of creating artifacts (flat areas, error accumulating badly),
+                    // OTOH poor dithering disturbs static backgrounds and creates oscilalting frames that break backgrounds
+                    // back and forth in two differently bad ways
+                    float max_diff = colordifference(row_pixels[col], bg_pixels[col]);
+                    float dithered_diff = colordifference(row_pixels[col], output_px);
+                    // if dithering is worse than natural difference between frames
+                    // (this rule dithers moving areas, but does not dither static areas)
+                    if (dithered_diff > max_diff) {
+                        // then see if an undithered color is closer to the ideal
+                        float undithered_diff = colordifference(row_pixels[col], acolormap[guessed_match].acolor);
+                        if (undithered_diff < max_diff) {
+                            undithered_bg_used++;
+                            output_px = acolormap[guessed_match].acolor;
+                            last_match = guessed_match;
+                        }
+                    }
+                }
             }
+
+            output_pixels[row][col] = last_match;
 
             f_pixel err = {
                 .r = (spx.r - output_px.r),
@@ -1665,29 +1706,6 @@ LIQ_NONNULL static liq_error finalize_histogram(liq_histogram *input_hist, liq_a
     return LIQ_OK;
 }
 
-LIQ_NONNULL static void modify_alpha(liq_image *input_image, rgba_pixel *const row_pixels)
-{
-    /* IE6 makes colors with even slightest transparency completely transparent,
-       thus to improve situation in IE, make colors that are less than ~10% transparent
-       completely opaque */
-
-    const float min_opaque_val = input_image->min_opaque_val;
-    const float almost_opaque_val = min_opaque_val * 169.f/256.f;
-    const unsigned int almost_opaque_val_int = (min_opaque_val * 169.f/256.f)*255.f;
-
-    for(unsigned int col = 0; col < input_image->width; col++) {
-        const rgba_pixel px = row_pixels[col];
-
-        /* ie bug: to avoid visible step caused by forced opaqueness, linearily raise opaqueness of almost-opaque colors */
-        if (px.a >= almost_opaque_val_int) {
-            float al = px.a / 255.f;
-            al = almost_opaque_val + (al-almost_opaque_val) * (1.f-almost_opaque_val) / (min_opaque_val-almost_opaque_val);
-            al *= 256.f;
-            row_pixels[col].a = al >= 255.f ? 255 : al;
-        }
-    }
-}
-
 /**
  Builds two maps:
     importance_map - approximation of areas with high-frequency noise, except straight edges. 1=flat, 0=noisy.
@@ -1750,7 +1768,7 @@ LIQ_NONNULL static void contrast_maps(liq_image *image)
             z *= z; // noise is amplified
             z *= z;
             // 85 is about 1/3rd of weight (not 0, because noisy pixels still need to be included, just not as precisely).
-            const unsigned int z_int = 85 + (unsigned int)(z * 171.f);
+            const unsigned int z_int = 80 + (unsigned int)(z * 176.f);
             noise[j*cols+i] = MIN(z_int, 255);
             const int e_int = 255 - (int)(edge * 256.f);
             edges[j*cols+i] = e_int > 0 ? MIN(e_int, 255) : 0;
@@ -1858,7 +1876,7 @@ static colormap *add_fixed_colors_to_palette(colormap *palette, const int max_co
 
 LIQ_NONNULL static void adjust_histogram_callback(hist_item *item, float diff)
 {
-    item->adjusted_weight = (item->perceptual_weight+item->adjusted_weight) * (sqrtf(1.f+diff));
+    item->adjusted_weight = (item->perceptual_weight + 2.0 * item->adjusted_weight) * (0.5 + diff);
 }
 
 /**
@@ -1882,6 +1900,7 @@ static colormap *find_best_palette(histogram *hist, const liq_attr *options, con
     double least_error = MAX_DIFF;
     double target_mse_overshoot = feedback_loop_trials>0 ? 1.05 : 1.0;
     const float total_trials = (float)(feedback_loop_trials>0?feedback_loop_trials:1);
+    int fails_in_a_row=0;
 
     do {
         colormap *newmap;
@@ -1926,15 +1945,13 @@ static colormap *find_best_palette(histogram *hist, const liq_attr *options, con
             max_colors = MIN(newmap->colors+1, max_colors);
 
             feedback_loop_trials -= 1; // asymptotic improvement could make it go on forever
+            fails_in_a_row = 0;
         } else {
-            for(unsigned int j=0; j < hist->size; j++) {
-                hist->achv[j].adjusted_weight = (hist->achv[j].perceptual_weight + hist->achv[j].adjusted_weight)/2.0;
-            }
-
+            fails_in_a_row++;
             target_mse_overshoot = 1.0;
-            feedback_loop_trials -= 6;
+
             // if error is really bad, it's unlikely to improve, so end sooner
-            if (total_error > least_error*4) feedback_loop_trials -= 3;
+            feedback_loop_trials -= 5 + fails_in_a_row;
             pam_freecolormap(newmap);
         }
 
@@ -2078,17 +2095,20 @@ LIQ_EXPORT LIQ_NONNULL liq_error liq_write_remapped_image(liq_result *result, li
         return LIQ_INVALID_POINTER;
     }
 
-    const size_t required_size = input_image->width * input_image->height;
+    const size_t required_size = (size_t)input_image->width * (size_t)input_image->height;
     if (buffer_size < required_size) {
         return LIQ_BUFFER_TOO_SMALL;
     }
 
-    LIQ_ARRAY(unsigned char *, rows, input_image->height);
+    unsigned char **rows = input_image->malloc(input_image->height * sizeof(unsigned char *));
     unsigned char *buffer_bytes = buffer;
     for(unsigned int i=0; i < input_image->height; i++) {
         rows[i] = &buffer_bytes[input_image->width * i];
     }
-    return liq_write_remapped_image_rows(result, input_image, rows);
+    
+    liq_error err = liq_write_remapped_image_rows(result, input_image, rows);
+    input_image->free(rows);
+    return err;
 }
 
 LIQ_EXPORT LIQ_NONNULL liq_error liq_write_remapped_image_rows(liq_result *quant, liq_image *input_image, unsigned char **row_pointers)
@@ -2139,7 +2159,7 @@ LIQ_EXPORT LIQ_NONNULL liq_error liq_write_remapped_image_rows(liq_result *quant
         // remapping above was the last chance to do K-Means iteration, hence the final palette is set after remapping
         set_rounded_palette(&result->int_palette, result->palette, result->gamma, quant->min_posterization_output);
 
-        if (!remap_to_palette_floyd(input_image, row_pointers, result, MAX(remapping_error*2.4, 16.f/256.f), generate_dither_map)) {
+        if (!remap_to_palette_floyd(input_image, row_pointers, result, MAX(remapping_error*2.4, 8.f/256.f), generate_dither_map)) {
             return LIQ_ABORTED;
         }
     }

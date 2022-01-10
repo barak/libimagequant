@@ -2,15 +2,20 @@
 
 #export DH_VERBOSE = 1
 
+include /usr/share/dpkg/default.mk
+
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 export DEB_CFLAGS_MAINT_APPEND=-D_FORTIFY_SOURCE=2
-
 
 %:
 	dh $@
 
-override_dh_install:
-	dh_install
+override_dh_auto_configure:
+	dh_auto_configure -- \
+		--with-openmp \
+		'CC=$(CC)' --$(if $(filter $(DEB_HOST_ARCH),amd64 x32),en,dis)able-sse
+
+execute_after_dh_install:
 	d-shlibmove --commit \
 		    --multiarch \
 		    --devunversioned \

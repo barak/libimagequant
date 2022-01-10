@@ -16,6 +16,12 @@
 #ifndef PAM_H
 #define PAM_H
 
+// accidental debug assertions make color search much slower,
+// so force assertions off if there's no explicit setting
+#if !defined(NDEBUG) && !defined(DEBUG)
+#define NDEBUG
+#endif
+
 #include <math.h>
 #include <assert.h>
 #include <stdlib.h>
@@ -141,12 +147,12 @@ inline static rgba_pixel f_to_rgb(const float gamma, const f_pixel px)
     };
 }
 
-ALWAYS_INLINE static double colordifference_ch(const double x, const double y, const double alphas);
-inline static double colordifference_ch(const double x, const double y, const double alphas)
+ALWAYS_INLINE static float colordifference_ch(const float x, const float y, const float alphas);
+inline static float colordifference_ch(const float x, const float y, const float alphas)
 {
     // maximum of channel blended on white, and blended on black
     // premultiplied alpha and backgrounds 0/1 shorten the formula
-    const double black = x-y, white = black+alphas;
+    const float black = x-y, white = black+alphas;
     return MAX(black*black, white*white);
 }
 
@@ -166,7 +172,7 @@ inline static float colordifference_stdc(const f_pixel px, const f_pixel py)
     // (px.rgb - px.a) - (py.rgb - py.a)
     // (px.rgb - py.rgb) + (py.a - px.a)
 
-    const double alphas = py.a-px.a;
+    const float alphas = py.a-px.a;
     return colordifference_ch(px.r, py.r, alphas) +
            colordifference_ch(px.g, py.g, alphas) +
            colordifference_ch(px.b, py.b, alphas);
@@ -176,8 +182,17 @@ ALWAYS_INLINE static float colordifference(f_pixel px, f_pixel py);
 inline static float colordifference(f_pixel px, f_pixel py)
 {
 #if USE_SSE
+#ifdef _MSC_VER
+    /* In MSVC we cannot use the align attribute in parameters.
+     * This is used a lot, so we just use an unaligned load.
+     * Also the compiler incorrectly inlines vpx and vpy without
+     * the volatile when optimization is applied for x86_64. */
+    const volatile __m128 vpx = _mm_loadu_ps((const float*)&px);
+    const volatile __m128 vpy = _mm_loadu_ps((const float*)&py);
+#else
     const __m128 vpx = _mm_load_ps((const float*)&px);
     const __m128 vpy = _mm_load_ps((const float*)&py);
+#endif
 
     // y.a - x.a
     __m128 alphas = _mm_sub_ss(vpy, vpx);

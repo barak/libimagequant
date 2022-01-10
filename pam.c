@@ -33,15 +33,7 @@ LIQ_PRIVATE bool pam_computeacolorhash(struct acolorhash_table *acht, const rgba
             // RGBA color is casted to long for easier hasing/comparisons
             union rgba_as_int px = {pixels[row][col]};
             unsigned int hash;
-            if (!px.rgba.a) {
-                // "dirty alpha" has different RGBA values that end up being the same fully transparent color
-                px.l=0; hash=0;
-
-                boost = 2000;
-                if (importance_map) {
-                    importance_map++;
-                }
-            } else {
+            if (px.rgba.a) {
                 // mask posterizes all 4 channels in one go
                 px.l = (px.l & posterize_mask) | ((px.l & posterize_high_mask) >> (8-ignorebits));
                 // fancier hashing algorithms didn't improve much
@@ -52,13 +44,20 @@ LIQ_PRIVATE bool pam_computeacolorhash(struct acolorhash_table *acht, const rgba
                 } else {
                     boost = 255;
                 }
+            } else {
+                // "dirty alpha" has different RGBA values that end up being the same fully transparent color
+                px.l=0; hash=0;
+
+                boost = 2000;
+                if (importance_map) {
+                    importance_map++;
+                }
             }
 
             if (!pam_add_to_hash(acht, hash, boost, px, row, rows)) {
                 return false;
             }
         }
-
     }
     acht->cols = cols;
     acht->rows += rows;
@@ -178,7 +177,7 @@ LIQ_PRIVATE struct acolorhash_table *pam_allocacolorhash(unsigned int maxcolors,
 
 ALWAYS_INLINE static float pam_add_to_hist(const float *gamma_lut, hist_item *achv, unsigned int *j, const struct acolorhist_arr_item *entry, const float max_perceptual_weight)
 {
-    if (entry->perceptual_weight == 0) {
+    if (entry->perceptual_weight == 0 && *j > 0) {
         return 0;
     }
     const float w = MIN(entry->perceptual_weight/128.f, max_perceptual_weight);
@@ -225,6 +224,9 @@ LIQ_PRIVATE histogram *pam_acolorhashtoacolorhist(const struct acolorhash_table 
     }
     hist->size = j;
     hist->total_perceptual_weight = total_weight;
+    for(unsigned int k=0; k < hist->size; k++) {
+        hist->achv[k].tmp.likely_colormap_index = 0;
+    }
     if (!j) {
         pam_freeacolorhist(hist);
         return NULL;
