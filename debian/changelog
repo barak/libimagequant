@@ -22,6 +22,7 @@ libimagequant (2.17.0-1) UNRELEASED; urgency=medium
   * Add Barak A. Pearlmutter as additional Uploader
   * Drop default debian/gbp.conf
   * Add salsa-ci file (routine-update)
+  * Add missing build dependency on dh addon.
 
  -- Barak A. Pearlmutter <bap@debian.org>  Fri, 07 Jan 2022 22:46:47 +0000
 
