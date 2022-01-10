@@ -5,6 +5,7 @@
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 export DEB_CFLAGS_MAINT_APPEND=-D_FORTIFY_SOURCE=2
 
+include /usr/share/dpkg/architecture.mk
 
 %:
 	dh $@
