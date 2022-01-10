@@ -1,4 +1,4 @@
-libimagequant (2.17.0-1) UNRELEASED; urgency=medium
+libimagequant (2.17.0-1) unstable; urgency=medium
 
   [ Barak A. Pearlmutter ]
   * Set debhelper-compat version in Build-Depends.
@@ -24,7 +24,7 @@ libimagequant (2.17.0-1) UNRELEASED; urgency=medium
   * Add salsa-ci file (routine-update)
   * Add missing build dependency on dh addon.
 
- -- Barak A. Pearlmutter <bap@debian.org>  Fri, 07 Jan 2022 22:46:47 +0000
+ -- Andreas Tille <tille@debian.org>  Mon, 10 Jan 2022 16:26:40 +0100
 
 libimagequant (2.12.2-1.1) unstable; urgency=medium
 
