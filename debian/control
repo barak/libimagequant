@@ -1,7 +1,6 @@
 Source: libimagequant
 Maintainer: Debian PhotoTools Maintainers <pkg-phototools-devel@lists.alioth.debian.org>
-Uploaders: Herbert Parentes Fortes Neto <hpfn@debian.org>,
-           Andreas Tille <tille@debian.org>
+Uploaders: Andreas Tille <tille@debian.org>
 Section: graphics
 Priority: optional
 Build-Depends: debhelper-compat (= 13), d-shlibs
