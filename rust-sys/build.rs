@@ -14,10 +14,13 @@ fn main() {
 
     if env::var("PROFILE").map(|p|p != "debug").unwrap_or(true) {
         cc.define("NDEBUG", Some("1"));
+    } else {
+        cc.define("DEBUG", Some("1"));
     }
 
     if cfg!(feature = "openmp") {
-        cc.flag(&env::var("DEP_OPENMP_FLAG").unwrap());
+        env::var("DEP_OPENMP_FLAG").expect("openmp-sys failed")
+            .split(" ").for_each(|f| { cc.flag(f); });
     }
 
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").expect("Needs CARGO_CFG_TARGET_ARCH");
@@ -58,4 +61,12 @@ fn main() {
     }
 
     cc.compile("libimagequant.a");
+
+    if cfg!(feature = "openmp") {
+        if let Some(link) = env::var_os("DEP_OPENMP_CARGO_LINK_INSTRUCTIONS") {
+            for i in env::split_paths(&link) {
+                println!("cargo:{}", i.display());
+            }
+        }
+    }
 }
