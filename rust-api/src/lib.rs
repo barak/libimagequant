@@ -13,12 +13,14 @@ pub use crate::ffi::liq_error::*;
 
 use fallible_collections::FallibleVec;
 use imagequant_sys as ffi;
+use std::ffi::CStr;
 use std::fmt;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::mem;
-use std::os::raw::{c_int, c_void};
+use std::os::raw::{c_int, c_void, c_char};
 use std::ptr;
+use std::ptr::NonNull;
 
 pub use rgb::RGBA8 as RGBA;
 
@@ -38,38 +40,53 @@ pub type Color = ffi::liq_color;
 /// Used if you're building histogram manually. Otherwise see `add_image()`
 pub type HistogramEntry = ffi::liq_histogram_entry;
 
+/// Print messages
+pub type LogCallbackFn = Box<dyn FnMut(&str) + Send>;
+
+/// Result of [`ProgressCallbackFn`]
+#[repr(C)]
+pub enum ControlFlow {
+    /// Continue processing as normal
+    Continue = 1,
+    /// Abort processing and fail
+    Break = 0,
+}
+
+/// Check progress and optionally abort
+pub type ProgressCallbackFn = Box<dyn FnMut(f32) -> ControlFlow + Send>;
+
 /// Settings for the conversion process. Start here.
 pub struct Attributes {
-    handle: *mut ffi::liq_attr,
+    handle: NonNull<ffi::liq_attr>,
     malloc: MallocUnsafeFn,
     free: FreeUnsafeFn,
+    log_callback: Option<Box<LogCallbackFn>>, // Double boxed, because it's a fat ptr, and Attributes can be moved
+    progress_callback: Option<Box<ProgressCallbackFn>>,
 }
 
 /// Describes image dimensions for the library.
 pub struct Image<'a> {
-    handle: *mut ffi::liq_image,
+    handle: NonNull<ffi::liq_image>,
     /// Holds row pointers for images with stride
     _marker: PhantomData<&'a [u8]>,
 }
 
 /// Palette inside.
 pub struct QuantizationResult {
-    handle: *mut ffi::liq_result,
+    handle: NonNull<ffi::liq_result>,
 }
 
 /// Generate one shared palette for multiple images.
 pub struct Histogram<'a> {
     attr: &'a Attributes,
-    handle: *mut ffi::liq_histogram,
+    handle: NonNull<ffi::liq_histogram>,
 }
 
 impl Drop for Attributes {
     #[inline]
     fn drop(&mut self) {
         unsafe {
-            if !self.handle.is_null() {
-                ffi::liq_attr_destroy(&mut *self.handle);
-            }
+            ffi::liq_attr_destroy(self.handle.as_mut());
         }
     }
 }
@@ -78,7 +95,7 @@ impl<'a> Drop for Image<'a> {
     #[inline]
     fn drop(&mut self) {
         unsafe {
-            ffi::liq_image_destroy(&mut *self.handle);
+            ffi::liq_image_destroy(self.handle.as_mut());
         }
     }
 }
@@ -87,7 +104,7 @@ impl Drop for QuantizationResult {
     #[inline]
     fn drop(&mut self) {
         unsafe {
-            ffi::liq_result_destroy(&mut *self.handle);
+            ffi::liq_result_destroy(self.handle.as_mut());
         }
     }
 }
@@ -96,19 +113,29 @@ impl<'a> Drop for Histogram<'a> {
     #[inline]
     fn drop(&mut self) {
         unsafe {
-            ffi::liq_histogram_destroy(&mut *self.handle);
+            ffi::liq_histogram_destroy(self.handle.as_mut());
         }
     }
 }
 
 impl Clone for Attributes {
+    /// NB: it doesn't clone the log/progress callbacks!
     #[inline]
     fn clone(&self) -> Attributes {
         unsafe {
+            let mut handle = NonNull::new(ffi::liq_attr_copy(self.handle.as_ref())).unwrap();
+            if self.log_callback.is_some() { // can't be cloned
+                ffi::liq_set_log_callback(handle.as_mut(), None, ptr::null_mut());
+            }
+            if self.progress_callback.is_some() { // can't be cloned
+                ffi::liq_attr_set_progress_callback(handle.as_mut(), None, ptr::null_mut());
+            }
             Attributes {
-                handle: ffi::liq_attr_copy(&*self.handle),
+                handle,
                 malloc: self.malloc,
                 free: self.free,
+                log_callback: None,
+                progress_callback: None,
             }
         }
     }
@@ -129,11 +156,12 @@ impl Attributes {
     #[must_use]
     pub fn new() -> Self {
         let handle = unsafe { ffi::liq_attr_create() };
-        assert!(!handle.is_null(), "SSE-capable CPU is required for this build.");
         Attributes {
-            handle,
+            handle: NonNull::new(handle).expect("SSE-capable CPU is required for this build."),
             malloc: libc::malloc,
             free: libc::free,
+            log_callback: None,
+            progress_callback: None,
         }
     }
 
@@ -149,14 +177,18 @@ impl Attributes {
     #[must_use]
     pub unsafe fn with_allocator(malloc: MallocUnsafeFn, free: FreeUnsafeFn) -> Self {
         let handle = ffi::liq_attr_create_with_allocator(malloc, free);
-        assert!(!handle.is_null(), "SSE-capable CPU is required for this build.");
-        Attributes { handle, malloc, free }
+        Attributes {
+            handle: NonNull::new(handle).expect("SSE-capable CPU is required for this build."),
+            malloc, free,
+            log_callback: None,
+            progress_callback: None,
+        }
     }
 
     /// It's better to use `set_quality()`
     #[inline]
     pub fn set_max_colors(&mut self, value: i32) -> liq_error {
-        unsafe { ffi::liq_set_max_colors(&mut *self.handle, value) }
+        unsafe { ffi::liq_set_max_colors(self.handle.as_mut(), value) }
     }
 
     /// Number of least significant bits to ignore.
@@ -164,13 +196,13 @@ impl Attributes {
     /// Useful for generating palettes for VGA, 15-bit textures, or other retro platforms.
     #[inline]
     pub fn set_min_posterization(&mut self, value: i32) -> liq_error {
-        unsafe { ffi::liq_set_min_posterization(&mut *self.handle, value) }
+        unsafe { ffi::liq_set_min_posterization(self.handle.as_mut(), value) }
     }
 
     /// Returns number of bits of precision truncated
     #[inline]
     pub fn min_posterization(&mut self) -> i32 {
-        unsafe { ffi::liq_get_min_posterization(&*self.handle) }
+        unsafe { ffi::liq_get_min_posterization(self.handle.as_ref()) }
     }
 
     /// Range 0-100, roughly like JPEG.
@@ -180,15 +212,15 @@ impl Attributes {
     /// Default is min 0, max 100.
     #[inline]
     pub fn set_quality(&mut self, min: u32, max: u32) -> liq_error {
-        unsafe { ffi::liq_set_quality(&mut *self.handle, min as c_int, max as c_int) }
+        unsafe { ffi::liq_set_quality(self.handle.as_mut(), min as c_int, max as c_int) }
     }
 
     /// Reads values set with `set_quality`
     #[inline]
     pub fn quality(&mut self) -> (u32, u32) {
         unsafe {
-            (ffi::liq_get_min_quality(&*self.handle) as u32,
-             ffi::liq_get_max_quality(&*self.handle) as u32)
+            (ffi::liq_get_min_quality(self.handle.as_ref()) as u32,
+             ffi::liq_get_max_quality(self.handle.as_ref()) as u32)
         }
     }
 
@@ -198,7 +230,7 @@ impl Attributes {
     /// for real-time generation of images.
     #[inline]
     pub fn set_speed(&mut self, value: i32) -> liq_error {
-        unsafe { ffi::liq_set_speed(&mut *self.handle, value) }
+        unsafe { ffi::liq_set_speed(self.handle.as_mut(), value) }
     }
 
     /// Move transparent color to the last entry in the palette
@@ -206,21 +238,21 @@ impl Attributes {
     /// This is less efficient for PNG, but required by some broken software
     #[inline]
     pub fn set_last_index_transparent(&mut self, value: bool) {
-        unsafe { ffi::liq_set_last_index_transparent(&mut *self.handle, value as c_int) }
+        unsafe { ffi::liq_set_last_index_transparent(self.handle.as_mut(), value as c_int) }
     }
 
     /// Return currently set speed/quality trade-off setting
     #[inline(always)]
     #[must_use]
     pub fn speed(&mut self) -> i32 {
-        unsafe { ffi::liq_get_speed(&*self.handle) }
+        unsafe { ffi::liq_get_speed(self.handle.as_ref()) }
     }
 
     /// Return max number of colors set
     #[inline(always)]
     #[must_use]
     pub fn max_colors(&mut self) -> i32 {
-        unsafe { ffi::liq_get_max_colors(&*self.handle) }
+        unsafe { ffi::liq_get_max_colors(self.handle.as_ref()) }
     }
 
     /// Describe dimensions of a slice of RGBA pixels
@@ -256,10 +288,67 @@ impl Attributes {
     pub fn quantize(&mut self, image: &Image<'_>) -> Result<QuantizationResult, liq_error> {
         unsafe {
             let mut h = ptr::null_mut();
-            match ffi::liq_image_quantize(&*image.handle, &*self.handle, &mut h) {
-                liq_error::LIQ_OK if !h.is_null() => Ok(QuantizationResult { handle: h }),
+            match ffi::liq_image_quantize(image.handle.as_ref(), self.handle.as_ref(), &mut h) {
+                liq_error::LIQ_OK if !h.is_null() => Ok(QuantizationResult { handle: NonNull::new_unchecked(h) }),
                 err => Err(err),
             }
+        }
+    }
+
+    /// Set callback function to be called every time the library wants to print a message.
+    ///
+    /// To share data with the callback, use `Arc` or `Atomic*` types and `move ||` closures.
+    #[inline(always)]
+    pub fn set_log_callback<F: FnMut(&str) + Send + 'static>(&mut self, callback: F) {
+        self._set_log_callback(Box::new(callback))
+    }
+
+    /// Set callback function to be called every time the library makes a progress.
+    /// It can be used to cancel operation early.
+    ///
+    /// To share data with the callback, use `Arc` or `Atomic*` types and `move ||` closures.
+    #[inline(always)]
+    pub fn set_progress_callback<F: FnMut(f32) -> ControlFlow + Send + 'static>(&mut self, callback: F) {
+        self._set_progress_callback(Box::new(callback))
+    }
+
+    fn _set_log_callback(&mut self, callback: LogCallbackFn) {
+        let mut log_callback = Box::new(callback);
+        let log_callback_ref: &mut LogCallbackFn = &mut *log_callback;
+        unsafe {
+            ffi::liq_set_log_callback(self.handle.as_mut(), Some(call_log_callback), log_callback_ref as *mut LogCallbackFn as *mut c_void);
+        }
+        self.log_callback = Some(log_callback);
+    }
+
+    fn _set_progress_callback(&mut self, callback: ProgressCallbackFn) {
+        let mut progress_callback = Box::new(callback);
+        let progress_callback_ref: &mut ProgressCallbackFn = &mut *progress_callback;
+        unsafe {
+            ffi::liq_attr_set_progress_callback(self.handle.as_mut(), Some(call_progress_callback), progress_callback_ref as *mut ProgressCallbackFn as *mut c_void);
+        }
+        self.progress_callback = Some(progress_callback);
+    }
+}
+
+extern "C" fn call_log_callback(_liq: &ffi::liq_attr, msg: *const c_char, user_data: *mut c_void) {
+    unsafe {
+        let cb: &mut LogCallbackFn = match (user_data as *mut LogCallbackFn).as_mut() {
+            Some(cb) => cb,
+            None => return,
+        };
+        match CStr::from_ptr(msg).to_str() {
+            Ok(msg) => cb(msg),
+            Err(_) => return,
+        };
+    }
+}
+
+extern "C" fn call_progress_callback(perc: f32, user_data: *mut c_void) -> c_int {
+    unsafe {
+        match (user_data as *mut ProgressCallbackFn).as_mut() {
+            Some(cb) => cb(perc) as _,
+            None => ControlFlow::Break as _,
         }
     }
 }
@@ -280,7 +369,7 @@ impl<'a> Histogram<'a> {
     pub fn new(attr: &'a Attributes) -> Self {
         Histogram {
             attr,
-            handle: unsafe { ffi::liq_histogram_create(&*attr.handle) },
+            handle: unsafe { NonNull::new(ffi::liq_histogram_create(attr.handle.as_ref())).unwrap() },
         }
     }
 
@@ -289,7 +378,7 @@ impl<'a> Histogram<'a> {
     /// Fixed colors added to the image are also added to the histogram. If total number of fixed colors exceeds 256, this function will fail with `LIQ_BUFFER_TOO_SMALL`.
     #[inline]
     pub fn add_image(&mut self, image: &mut Image<'_>) -> liq_error {
-        unsafe { ffi::liq_histogram_add_image(&mut *self.handle, &*self.attr.handle, &mut *image.handle) }
+        unsafe { ffi::liq_histogram_add_image(self.handle.as_mut(), self.attr.handle.as_ref(), image.handle.as_mut()) }
     }
 
     /// Alternative to `add_image()`. Intead of counting colors in an image, it directly takes an array of colors and their counts.
@@ -298,7 +387,7 @@ impl<'a> Histogram<'a> {
     #[inline]
     pub fn add_colors(&mut self, colors: &[HistogramEntry], gamma: f64) -> liq_error {
         unsafe {
-            ffi::liq_histogram_add_colors(&mut *self.handle, &*self.attr.handle, colors.as_ptr(), colors.len() as c_int, gamma)
+            ffi::liq_histogram_add_colors(self.handle.as_mut(), self.attr.handle.as_ref(), colors.as_ptr(), colors.len() as c_int, gamma)
         }
     }
 
@@ -310,8 +399,8 @@ impl<'a> Histogram<'a> {
     pub fn quantize(&mut self) -> Result<QuantizationResult, liq_error> {
         unsafe {
             let mut h = ptr::null_mut();
-            match ffi::liq_histogram_quantize(&*self.handle, &*self.attr.handle, &mut h) {
-                liq_error::LIQ_OK if !h.is_null() => Ok(QuantizationResult { handle: h }),
+            match ffi::liq_histogram_quantize(self.handle.as_ref(), self.attr.handle.as_ref(), &mut h) {
+                liq_error::LIQ_OK if !h.is_null() => Ok(QuantizationResult { handle: NonNull::new_unchecked(h) }),
                 err => Err(err),
             }
         }
@@ -345,12 +434,10 @@ impl<'bitmap> Image<'bitmap> {
     /// (i.e. not a slice, not a Trait object. `Box` it if you must).
     #[inline]
     pub fn new_unsafe_fn<CustomData: Send + Sync + 'bitmap>(attr: &Attributes, convert_row_fn: ConvertRowUnsafeFn<CustomData>, user_data: *mut CustomData, width: usize, height: usize, gamma: f64) -> Result<Self, liq_error> {
-        unsafe {
-            match ffi::liq_image_create_custom(&*attr.handle, mem::transmute(convert_row_fn), user_data.cast(), width as c_int, height as c_int, gamma) {
-                handle if !handle.is_null() => Ok(Image { handle, _marker: PhantomData }),
-                _ => Err(LIQ_INVALID_POINTER),
-            }
-        }
+        let handle = NonNull::new(unsafe {
+            ffi::liq_image_create_custom(attr.handle.as_ref(), mem::transmute(convert_row_fn), user_data.cast(), width as c_int, height as c_int, gamma)
+        }).ok_or(LIQ_INVALID_POINTER)?;
+        Ok(Image { handle, _marker: PhantomData })
     }
 
     /// Stride is in pixels. Allows defining regions of larger images or images with padding without copying.
@@ -380,16 +467,20 @@ impl<'bitmap> Image<'bitmap> {
             (bitmap.as_ptr(), ffi::liq_ownership::LIQ_OWN_ROWS)
         };
         let rows = Self::malloc_image_rows(bitmap, stride, height, attr.malloc);
-        let h = ffi::liq_image_create_rgba_rows(&*attr.handle, rows, width as c_int, height as c_int, gamma);
-        if h.is_null() {
-            (attr.free)(rows.cast());
-            return Err(LIQ_INVALID_POINTER);
-        }
-        let img = Image {
-            handle: h,
-            _marker: PhantomData,
+        let h = NonNull::new(ffi::liq_image_create_rgba_rows(attr.handle.as_ref(), rows, width as c_int, height as c_int, gamma));
+        let img = match h {
+            None => {
+                (attr.free)(rows.cast());
+                return Err(LIQ_INVALID_POINTER);
+            }
+            Some(h) => {
+                Image {
+                    handle: h,
+                    _marker: PhantomData,
+                }
+            }
         };
-        match ffi::liq_image_set_memory_ownership(&*h, ownership) {
+        match ffi::liq_image_set_memory_ownership(img.handle.as_ref(), ownership) {
             LIQ_OK => Ok(img),
             err => {
                 drop(img);
@@ -416,14 +507,14 @@ impl<'bitmap> Image<'bitmap> {
     #[inline]
     #[must_use]
     pub fn width(&self) -> usize {
-        unsafe { ffi::liq_image_get_width(&*self.handle) as usize }
+        unsafe { ffi::liq_image_get_width(self.handle.as_ref()) as usize }
     }
 
     /// Height of the image in pixels
     #[inline]
     #[must_use]
     pub fn height(&self) -> usize {
-        unsafe { ffi::liq_image_get_height(&*self.handle) as usize }
+        unsafe { ffi::liq_image_get_height(self.handle.as_ref()) as usize }
     }
 
     /// Reserves a color in the output palette created from this image. It behaves as if the given color was used in the image and was very important.
@@ -435,7 +526,7 @@ impl<'bitmap> Image<'bitmap> {
     /// Returns error if more than 256 colors are added. If image is quantized to fewer colors than the number of fixed colors added, then excess fixed colors will be ignored.
     #[inline]
     pub fn add_fixed_color(&mut self, color: ffi::liq_color) -> liq_error {
-        unsafe { ffi::liq_image_add_fixed_color(&mut *self.handle, color) }
+        unsafe { ffi::liq_image_add_fixed_color(self.handle.as_mut(), color) }
     }
 
     /// Remap pixels assuming they will be displayed on this background.
@@ -446,7 +537,7 @@ impl<'bitmap> Image<'bitmap> {
     #[inline]
     pub fn set_background<'own, 'bg: 'own>(&'own mut self, background: Image<'bg>) -> Result<(), liq_error> {
         unsafe {
-            ffi::liq_image_set_background(&mut *self.handle, background.into_raw()).ok()
+            ffi::liq_image_set_background(self.handle.as_mut(), background.into_raw()).ok()
         }
     }
 
@@ -456,15 +547,15 @@ impl<'bitmap> Image<'bitmap> {
     #[inline]
     pub fn set_importance_map(&mut self, map: &[u8]) -> Result<(), liq_error> {
         unsafe {
-            ffi::liq_image_set_importance_map(&mut *self.handle, map.as_ptr() as *mut _, map.len(), ffi::liq_ownership::LIQ_COPY_PIXELS).ok()
+            ffi::liq_image_set_importance_map(self.handle.as_mut(), map.as_ptr() as *mut _, map.len(), ffi::liq_ownership::LIQ_COPY_PIXELS).ok()
         }
     }
 
     #[inline]
-    fn into_raw(mut self) -> *mut ffi::liq_image {
+    fn into_raw(self) -> *mut ffi::liq_image {
         let handle = self.handle;
-        self.handle = ptr::null_mut();
-        handle
+        mem::forget(self);
+        handle.as_ptr()
     }
 }
 
@@ -472,13 +563,13 @@ impl QuantizationResult {
     /// Set to 1.0 to get nice smooth image
     #[inline]
     pub fn set_dithering_level(&mut self, value: f32) -> liq_error {
-        unsafe { ffi::liq_set_dithering_level(&mut *self.handle, value) }
+        unsafe { ffi::liq_set_dithering_level(self.handle.as_mut(), value) }
     }
 
     /// The default is sRGB gamma (~1/2.2)
     #[inline]
     pub fn set_output_gamma(&mut self, value: f64) -> liq_error {
-        unsafe { ffi::liq_set_output_gamma(&mut *self.handle, value) }
+        unsafe { ffi::liq_set_output_gamma(self.handle.as_mut(), value) }
     }
 
     /// Approximate gamma correction value used for the output
@@ -487,21 +578,21 @@ impl QuantizationResult {
     #[inline]
     #[must_use]
     pub fn output_gamma(&mut self) -> f64 {
-        unsafe { ffi::liq_get_output_gamma(&*self.handle) }
+        unsafe { ffi::liq_get_output_gamma(self.handle.as_ref()) }
     }
 
     /// Number 0-100 guessing how nice the input image will look if remapped to this palette
     #[inline]
     #[must_use]
     pub fn quantization_quality(&self) -> i32 {
-        unsafe { ffi::liq_get_quantization_quality(&*self.handle) as i32 }
+        unsafe { ffi::liq_get_quantization_quality(self.handle.as_ref()) as i32 }
     }
 
     /// Approximate mean square error of the palette
     #[inline]
     #[must_use]
     pub fn quantization_error(&self) -> Option<f64> {
-        match unsafe { ffi::liq_get_quantization_error(&*self.handle) } {
+        match unsafe { ffi::liq_get_quantization_error(self.handle.as_ref()) } {
             x if x < 0. => None,
             x => Some(x),
         }
@@ -526,7 +617,7 @@ impl QuantizationResult {
     #[inline]
     pub fn palette_ref(&mut self) -> &[Color] {
         unsafe {
-            let pal = &*ffi::liq_get_palette(&mut *self.handle);
+            let pal = &*ffi::liq_get_palette(self.handle.as_mut());
             std::slice::from_raw_parts(pal.entries.as_ptr(), (pal.count as usize).min(pal.entries.len()))
         }
     }
@@ -557,7 +648,7 @@ impl QuantizationResult {
     #[inline]
     pub fn remap_into(&mut self, image: &mut Image<'_>, output_buf: &mut [MaybeUninit<u8>]) -> Result<(), liq_error> {
         unsafe {
-            match ffi::liq_write_remapped_image(&mut *self.handle, &mut *image.handle, output_buf.as_mut_ptr().cast(), output_buf.len()) {
+            match ffi::liq_write_remapped_image(self.handle.as_mut(), image.handle.as_mut(), output_buf.as_mut_ptr().cast(), output_buf.len()) {
                 LIQ_OK => Ok(()),
                 err => Err(err),
             }
@@ -640,6 +731,23 @@ fn poke_it() {
     assert_eq!(1, liq.min_posterization());
     liq.set_min_posterization(0);
 
+    use std::sync::atomic::Ordering::SeqCst;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    let log_called = Arc::new(AtomicBool::new(false));
+    let log_called2 = log_called.clone();
+    liq.set_log_callback(move |_msg| {
+        log_called2.store(true, SeqCst);
+    });
+
+    let prog_called = Arc::new(AtomicBool::new(false));
+    let prog_called2 = prog_called.clone();
+    liq.set_progress_callback(move |_perc| {
+        prog_called2.store(true, SeqCst);
+        ControlFlow::Continue
+    });
+
     // Describe the bitmap
     let ref mut img = liq.new_image(&fakebitmap[..], width, height, 0.0).unwrap();
 
@@ -659,6 +767,9 @@ fn poke_it() {
     assert_eq!(100, res.quantization_quality());
     assert_eq!(Color { r: 255, g: 255, b: 255, a: 255 }, palette[0]);
     assert_eq!(Color { r: 0x55, g: 0x66, b: 0x77, a: 255 }, palette[1]);
+
+    assert!(log_called.load(SeqCst));
+    assert!(prog_called.load(SeqCst));
 }
 
 #[test]

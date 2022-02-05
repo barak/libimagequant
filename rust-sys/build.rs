@@ -4,15 +4,15 @@
 extern crate cc;
 
 use std::env;
-use std::path::PathBuf;
 use std::fs::canonicalize;
+use std::path::PathBuf;
 
 fn main() {
     let mut cc = cc::Build::new();
     let compiler = cc.get_compiler();
     cc.warnings(false);
 
-    if env::var("PROFILE").map(|p|p != "debug").unwrap_or(true) {
+    if env::var("PROFILE").map(|p| p != "debug").unwrap_or(true) {
         cc.define("NDEBUG", Some("1"));
     } else {
         cc.define("DEBUG", Some("1"));
@@ -41,6 +41,7 @@ fn main() {
             .file("msvc-dist/mediancut.c")
             .file("msvc-dist/mempool.c")
             .file("msvc-dist/pam.c")
+            .file("msvc-dist/remap.c")
             .file("msvc-dist/blur.c");
     } else {
         // This is so that I don't forget to publish MSVC version as well
@@ -57,6 +58,7 @@ fn main() {
             .file("mediancut.c")
             .file("mempool.c")
             .file("pam.c")
+            .file("remap.c")
             .file("blur.c");
     }
 

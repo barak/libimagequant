@@ -36,9 +36,9 @@
 #[cfg(feature = "openmp")]
 extern crate openmp_sys;
 
-use std::os::raw::{c_int, c_uint, c_char, c_void};
 use std::error;
 use std::fmt;
+use std::os::raw::{c_char, c_int, c_uint, c_void};
 
 pub enum liq_attr {}
 pub enum liq_image {}
@@ -85,8 +85,7 @@ pub struct liq_histogram_entry {
     pub count: c_uint,
 }
 
-impl error::Error for liq_error {
-}
+impl error::Error for liq_error {}
 
 impl fmt::Display for liq_error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -140,12 +139,11 @@ impl liq_error {
     }
 }
 
-pub type liq_log_callback_function = Option<unsafe extern "C" fn(arg1: &liq_attr, message: *const c_char, user_info: *mut c_void)>;
-pub type liq_log_flush_callback_function = Option<unsafe extern "C" fn(arg1: &liq_attr, user_info: *mut c_void)>;
+pub type liq_log_callback_function = Option<unsafe extern "C" fn(liq: &liq_attr, message: *const c_char, user_info: *mut c_void)>;
+pub type liq_log_flush_callback_function = Option<unsafe extern "C" fn(liq: &liq_attr, user_info: *mut c_void)>;
 pub type liq_progress_callback_function = Option<unsafe extern "C" fn(progress_percent: f32, user_info: *mut c_void) -> c_int>;
 pub type liq_image_get_rgba_row_callback = unsafe extern "C" fn(row_out: *mut liq_color, row: c_int, width: c_int, user_info: *mut c_void);
 
-#[link(name="imagequant", kind="static")]
 extern "C" {
 
     /// Returns object that will hold initial settings (attributes) for the library.
@@ -202,10 +200,10 @@ extern "C" {
     /// unsafe: It will crash if the owned memory wasn't allocated using `libc::malloc()` (or whatever allocator C side is using)
     pub fn liq_image_set_memory_ownership(image: &liq_image, own: liq_ownership) -> liq_error;
 
-    pub fn liq_set_log_callback(arg1: &mut liq_attr, arg2: liq_log_callback_function, user_info: *mut c_void);
-    pub fn liq_set_log_flush_callback(arg1: &mut liq_attr, arg2: liq_log_flush_callback_function, user_info: *mut c_void);
-    pub fn liq_attr_set_progress_callback(arg1: &mut liq_attr, arg2: liq_progress_callback_function, user_info: *mut c_void);
-    pub fn liq_result_set_progress_callback(arg1: &mut liq_result, arg2: liq_progress_callback_function, user_info: *mut c_void);
+    pub fn liq_set_log_callback(liq: &mut liq_attr, cb: liq_log_callback_function, user_info: *mut c_void);
+    pub fn liq_set_log_flush_callback(liq: &mut liq_attr, cb: liq_log_flush_callback_function, user_info: *mut c_void);
+    pub fn liq_attr_set_progress_callback(liq: &mut liq_attr, cb: liq_progress_callback_function, user_info: *mut c_void);
+    pub fn liq_result_set_progress_callback(arg1: &mut liq_result, cb: liq_progress_callback_function, user_info: *mut c_void);
     pub fn liq_image_create_custom(attr: &liq_attr, row_callback: liq_image_get_rgba_row_callback, user_info: *mut c_void, width: c_int, height: c_int, gamma: f64) -> *mut liq_image;
     /// Remap assuming the image will be always presented exactly on top of this background.
     ///
