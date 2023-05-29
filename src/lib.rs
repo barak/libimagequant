@@ -25,7 +25,9 @@ mod rayoff;
 
 #[cfg(feature = "threads")]
 mod rayoff {
-    pub(crate) use rayon::prelude::{ParallelSliceMut, ParallelIterator, ParallelBridge};
+    pub(crate) use num_cpus::get as num_cpus;
+    pub(crate) use rayon::prelude::{ParallelBridge, ParallelIterator, ParallelSliceMut};
+    pub(crate) use rayon::scope;
     pub(crate) use thread_local::ThreadLocal;
 }
 
@@ -39,6 +41,7 @@ pub use error::Error;
 pub use hist::Histogram;
 pub use hist::HistogramEntry;
 pub use image::Image;
+#[doc(hidden)]
 pub use pal::Palette;
 pub use pal::RGBA;
 pub use quant::QuantizationResult;
@@ -48,9 +51,6 @@ pub use quant::QuantizationResult;
 pub use error::Error as liq_error;
 
 const LIQ_HIGH_MEMORY_LIMIT: usize = 1 << 26;
-
-/// I don't care about NaNs, just sort them!
-type OrdFloat<F> = noisy_float::NoisyFloat<F, noisy_float::checkers::FiniteChecker>;
 
 /// [Start here][Attributes]: creates new handle for library configuration
 ///
@@ -95,8 +95,8 @@ fn histogram() {
     let mut image2 = attr.new_image(&bitmap2[..], 1, 1, 0.0).unwrap();
     hist.add_image(&attr, &mut image2).unwrap();
 
-    hist.add_colors(&[HistogramEntry{
-        color: RGBA::new(255,128,255,128),
+    hist.add_colors(&[HistogramEntry {
+        color: RGBA::new(255, 128, 255, 128),
         count: 10,
     }], 0.0).unwrap();
 
@@ -146,7 +146,7 @@ fn poke_it() {
     // The magic happens in quantize()
     let mut res = match liq.quantize(img) {
         Ok(res) => res,
-        Err(err) => panic!("Quantization failed, because: {:?}", err),
+        Err(err) => panic!("Quantization failed, because: {err:?}"),
     };
 
     // Enable dithering for subsequent remappings
@@ -173,7 +173,7 @@ fn set_importance_map() {
     img.set_importance_map(&map[..]).unwrap();
     let mut res = liq.quantize(&mut img).unwrap();
     let pal = res.palette();
-    assert_eq!(1, pal.len(), "{:?}", pal);
+    assert_eq!(1, pal.len(), "{pal:?}");
     assert_eq!(bitmap[0], pal[0]);
 }
 
@@ -206,7 +206,9 @@ fn r_callback_test() {
             }
             called2.fetch_add(1, SeqCst);
         };
-        let mut img = unsafe { Image::new_fn(&a, get_row, 123, 5, 0.).unwrap() };
+        let mut img = unsafe {
+            Image::new_fn(&a, get_row, 123, 5, 0.).unwrap()
+        };
         a.quantize(&mut img).unwrap()
     };
     let called = called.load(SeqCst);
@@ -218,7 +220,7 @@ fn r_callback_test() {
 fn sizes() {
     use pal::PalF;
     use pal::Palette;
-    assert!(std::mem::size_of::<PalF>() < 256*(8*4)+32, "{}", std::mem::size_of::<PalF>());
+    assert!(std::mem::size_of::<PalF>() < crate::pal::MAX_COLORS*(8*4)+32, "{}", std::mem::size_of::<PalF>());
     assert!(std::mem::size_of::<QuantizationResult>() < std::mem::size_of::<PalF>() + std::mem::size_of::<Palette>() + 100, "{}", std::mem::size_of::<QuantizationResult>());
     assert!(std::mem::size_of::<Attributes>() < 200);
     assert!(std::mem::size_of::<Image>() < 300);
@@ -240,7 +242,7 @@ pub fn _unstable_internal_kmeans_bench() -> impl FnMut() {
     }).collect::<Vec<_>>();
 
     h.add_colors(&e, 0.).unwrap();
-    let mut hist = h.finalize_builder(0.45455, 0.).unwrap();
+    let mut hist = h.finalize_builder(0.45455).unwrap();
 
     let lut = pal::gamma_lut(0.45455);
     let mut p = PalF::new();
@@ -250,5 +252,80 @@ pub fn _unstable_internal_kmeans_bench() -> impl FnMut() {
 
     move || {
         kmeans::Kmeans::iteration(&mut hist, &mut p, false).unwrap();
+    }
+}
+
+trait PushInCapacity<T> {
+    fn push_in_cap(&mut self, val: T);
+}
+
+impl<T> PushInCapacity<T> for Vec<T> {
+    #[track_caller]
+    #[inline(always)]
+    fn push_in_cap(&mut self, val: T) {
+        debug_assert!(self.capacity() != self.len());
+        if self.capacity() != self.len() {
+            self.push(val);
+        }
+    }
+}
+
+/// Rust is too conservative about sorting floats.
+/// This library uses only finite values, so they're sortable.
+#[derive(Debug, PartialEq, PartialOrd, Copy, Clone)]
+#[repr(transparent)]
+struct OrdFloat<T>(pub(crate) T);
+
+impl Eq for OrdFloat<f32> {
+}
+
+impl Ord for OrdFloat<f32> {
+    #[inline]
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering { self.0.partial_cmp(&other.0).unwrap_or(std::cmp::Ordering::Equal) }
+}
+
+impl Eq for OrdFloat<f64> {
+}
+
+impl Ord for OrdFloat<f64> {
+    #[inline]
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering { self.0.partial_cmp(&other.0).unwrap_or(std::cmp::Ordering::Equal) }
+}
+
+impl OrdFloat<f32> {
+    pub fn new(v: f32) -> Self {
+        debug_assert!(v.is_finite());
+        Self(v)
+    }
+}
+
+impl OrdFloat<f64> {
+    pub fn new64(v: f64) -> Self {
+        debug_assert!(v.is_finite());
+        Self(v)
+    }
+}
+
+#[test]
+fn test_fixed_colors() {
+    let attr = Attributes::new();
+    let mut h = Histogram::new(&attr);
+    let tmp = (0..128).map(|c| HistogramEntry {
+        color: RGBA::new(c,c,c,255),
+        count: 1,
+    }).collect::<Vec<_>>();
+    h.add_colors(&tmp, 0.).unwrap();
+    for f in 200..255 {
+        h.add_fixed_color(RGBA::new(f,f,f,255), 0.).unwrap();
+    }
+    let mut r = h.quantize(&attr).unwrap();
+    let pal = r.palette();
+
+    for (i, c) in (200..255).enumerate() {
+        assert_eq!(pal[i], RGBA::new(c,c,c,255));
+    }
+
+    for c in 0..128 {
+        assert!(pal[55..].iter().any(|&p| p == RGBA::new(c,c,c,255)));
     }
 }

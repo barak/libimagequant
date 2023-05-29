@@ -2,15 +2,16 @@
 //! For public stable a C FFI interface, see imagequant-sys crate instead.
 #![allow(missing_docs)]
 
-use crate::Error;
-use crate::RGBA;
-use crate::Attributes;
-use crate::Palette;
-use crate::QuantizationResult;
-use crate::Image;
 use crate::rows::RowCallback;
+use crate::seacow::Pointer;
 use crate::seacow::RowBitmapMut;
 use crate::seacow::SeaCow;
+use crate::Attributes;
+use crate::Error;
+use crate::Image;
+use crate::pal::Palette;
+use crate::QuantizationResult;
+use crate::RGBA;
 use std::mem::MaybeUninit;
 
 pub const LIQ_VERSION: u32 = 40000;
@@ -20,18 +21,18 @@ pub fn liq_get_palette_impl(r: &mut QuantizationResult) -> &Palette {
 }
 
 pub unsafe fn liq_image_create_rgba_rows_impl<'rows>(attr: &Attributes, rows: &'rows [*const RGBA], width: u32, height: u32, gamma: f64) -> Option<crate::image::Image<'rows>> {
-    let rows = SeaCow::borrowed(rows);
+    let rows = SeaCow::borrowed(std::mem::transmute::<&'rows [*const RGBA], &'rows [Pointer<RGBA>]>(rows));
     let rows_slice = rows.as_slice();
-    if rows_slice.iter().any(|r| r.is_null()) {
+    if rows_slice.iter().any(|r| r.0.is_null()) {
         return None;
     }
     crate::image::Image::new_internal(attr, crate::rows::PixelsSource::Pixels { rows, pixels: None }, width, height, gamma).ok()
 }
 
 pub unsafe fn liq_image_create_rgba_bitmap_impl<'rows>(attr: &Attributes, rows: Box<[*const RGBA]>, width: u32, height: u32, gamma: f64) -> Option<crate::image::Image<'rows>> {
-    let rows = SeaCow::boxed(rows);
+    let rows = SeaCow::boxed(std::mem::transmute::<Box<[*const RGBA]>, Box<[Pointer<RGBA>]>>(rows));
     let rows_slice = rows.as_slice();
-    if rows_slice.iter().any(|r| r.is_null()) {
+    if rows_slice.iter().any(|r| r.0.is_null()) {
         return None;
     }
     crate::image::Image::new_internal(attr, crate::rows::PixelsSource::Pixels { rows, pixels: None }, width, height, gamma).ok()

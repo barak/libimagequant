@@ -1,12 +1,14 @@
-use crate::pal::MAX_COLORS;
 use crate::pal::PalIndex;
+use crate::pal::MAX_COLORS;
 use crate::pal::{f_pixel, PalF};
-use crate::{OrdFloat, Error};
-use fallible_collections::FallibleVec;
+use crate::{Error, OrdFloat};
 
 impl<'pal> Nearest<'pal> {
     #[inline(never)]
     pub fn new(palette: &'pal PalF) -> Result<Self, Error> {
+        if palette.len() > PalIndex::MAX as usize + 1 {
+            return Err(Error::Unsupported);
+        }
         let mut indexes: Vec<_> = (0..palette.len())
             .map(|idx| MapIndex { idx: idx as _ })
             .collect();
@@ -14,14 +16,14 @@ impl<'pal> Nearest<'pal> {
             return Err(Error::Unsupported);
         }
         let mut handle = Nearest {
-            root: vp_create_node(&mut indexes, palette)?,
+            root: vp_create_node(&mut indexes, palette),
             palette,
             nearest_other_color_dist: [0.; MAX_COLORS],
         };
         for (i, color) in palette.as_slice().iter().enumerate() {
             let mut best = Visitor {
                 idx: 0, distance: f32::MAX, distance_squared: f32::MAX,
-                exclude: i as i16,
+                exclude: Some(i as PalIndex),
             };
             vp_search_node(&handle.root, color, &mut best);
             handle.nearest_other_color_dist[i] = best.distance_squared / 4.;
@@ -43,14 +45,14 @@ impl Nearest<'_> {
                 distance: guess_diff.sqrt(),
                 distance_squared: guess_diff,
                 idx: likely_colormap_index,
-                exclude: -1,
+                exclude: None,
             }
         } else {
-            Visitor { distance: f32::INFINITY, distance_squared: f32::INFINITY, idx: 0, exclude: -1, }
+            Visitor { distance: f32::INFINITY, distance_squared: f32::INFINITY, idx: 0, exclude: None, }
         };
 
         vp_search_node(&self.root, px, &mut best_candidate);
-        (best_candidate.idx as PalIndex, best_candidate.distance_squared)
+        (best_candidate.idx, best_candidate.distance_squared)
     }
 }
 
@@ -68,13 +70,13 @@ pub struct Visitor {
     pub distance: f32,
     pub distance_squared: f32,
     pub idx: PalIndex,
-    pub exclude: i16,
+    pub exclude: Option<PalIndex>,
 }
 
 impl Visitor {
     #[inline]
     fn visit(&mut self, distance: f32, distance_squared: f32, idx: PalIndex) {
-        if distance_squared < self.distance_squared && self.exclude != idx as i16 {
+        if distance_squared < self.distance_squared && self.exclude != Some(idx) {
             self.distance = distance;
             self.distance_squared = distance_squared;
             self.idx = idx;
@@ -82,76 +84,84 @@ impl Visitor {
     }
 }
 
-pub struct Leaf {
-    pub color: f_pixel,
-    pub idx: PalIndex,
+pub(crate) struct Node {
+    vantage_point: f_pixel,
+    inner: NodeInner,
+    idx: PalIndex,
 }
 
-pub struct Node {
-    pub near: Option<Box<Node>>,
-    pub far: Option<Box<Node>>,
-    pub vantage_point: f_pixel,
-    pub radius: f32,
-    pub radius_squared: f32,
-    pub idx: PalIndex,
-    pub rest: Box<[Leaf]>,
+const LEAF_MAX_SIZE: usize = 6;
+
+enum NodeInner {
+    Nodes {
+        radius: f32,
+        radius_squared: f32,
+        near: Box<Node>,
+        far: Box<Node>,
+    },
+    Leaf {
+        len: u8,
+        idxs: [PalIndex; LEAF_MAX_SIZE],
+        colors: Box<[f_pixel; LEAF_MAX_SIZE]>,
+    },
 }
 
 #[inline(never)]
-fn vp_create_node(indexes: &mut [MapIndex], items: &PalF) -> Result<Node, Error> {
+fn vp_create_node(indexes: &mut [MapIndex], items: &PalF) -> Node {
     debug_assert!(!indexes.is_empty());
     let palette = items.as_slice();
 
-    if indexes.len() <= 1 {
-        return Ok(Node {
+    if indexes.len() == 1 {
+        return Node {
             vantage_point: palette[usize::from(indexes[0].idx)],
-            radius: f32::NAN,
-            radius_squared: f32::NAN,
             idx: indexes[0].idx,
-            near: None,
-            far: None,
-            rest: [].into(),
-        });
+            inner: NodeInner::Leaf { len: 0, idxs: [Default::default(); LEAF_MAX_SIZE], colors: Box::new([Default::default(); LEAF_MAX_SIZE]) },
+        };
     }
 
     let most_popular_item = indexes.iter().enumerate().max_by_key(move |(_, idx)| {
-        OrdFloat::<f32>::unchecked_new(items.pop_as_slice()[usize::from(idx.idx)].popularity())
+        OrdFloat::new(items.pop_as_slice()[usize::from(idx.idx)].popularity())
     }).map(|(n, _)| n).unwrap_or_default();
     indexes.swap(most_popular_item, 0);
     let (ref_, indexes) = indexes.split_first_mut().unwrap();
 
     let vantage_point = palette[usize::from(ref_.idx)];
-    indexes.sort_unstable_by_key(move |i| OrdFloat::<f32>::unchecked_new(vantage_point.diff(&palette[usize::from(i.idx)])));
+    indexes.sort_unstable_by_key(move |i| OrdFloat::new(vantage_point.diff(&palette[usize::from(i.idx)])));
 
     let num_indexes = indexes.len();
-    let half_index = num_indexes / 2;
-    let (near, far) = indexes.split_at_mut(half_index);
 
-    let radius_squared = vantage_point.diff(&palette[usize::from(far[0].idx)]);
-    let radius = radius_squared.sqrt();
+    let inner = if num_indexes <= LEAF_MAX_SIZE {
+        let mut colors = [Default::default(); LEAF_MAX_SIZE];
+        let mut idxs = [Default::default(); LEAF_MAX_SIZE];
 
-    let (near, far, rest) = if num_indexes < 7 {
-        let mut rest: Vec<_> = FallibleVec::try_with_capacity(num_indexes)?;
-        rest.extend(near.iter().chain(far.iter()).map(|i| Leaf {
-            idx: i.idx,
-            color: palette[usize::from(i.idx)],
-        }));
-        (None, None, rest.into_boxed_slice())
+        indexes.iter().zip(colors.iter_mut().zip(idxs.iter_mut())).for_each(|(i, (color, idx))| {
+            *idx = i.idx;
+            *color = palette[usize::from(i.idx)];
+        });
+        NodeInner::Leaf {
+            len: num_indexes as _,
+            idxs,
+            colors: Box::new(colors),
+        }
     } else {
-        (
-            if !near.is_empty() { Some(Box::new(vp_create_node(near, items)?)) } else { None },
-            if !far.is_empty() { Some(Box::new(vp_create_node(far, items)?)) } else { None },
-            [].into(),
-        )
+        let half_index = num_indexes / 2;
+        let (near, far) = indexes.split_at_mut(half_index);
+        debug_assert!(!near.is_empty());
+        debug_assert!(!far.is_empty());
+        let radius_squared = vantage_point.diff(&palette[usize::from(far[0].idx)]);
+        let radius = radius_squared.sqrt();
+        NodeInner::Nodes {
+            radius, radius_squared,
+            near: Box::new(vp_create_node(near, items)),
+            far: Box::new(vp_create_node(far, items)),
+        }
     };
 
-    Ok(Node {
+    Node {
+        inner,
         vantage_point: palette[usize::from(ref_.idx)],
-        radius,
-        radius_squared,
         idx: ref_.idx,
-        near, far, rest,
-    })
+    }
 }
 
 #[inline(never)]
@@ -162,39 +172,34 @@ fn vp_search_node(mut node: &Node, needle: &f_pixel, best_candidate: &mut Visito
 
         best_candidate.visit(distance, distance_squared, node.idx);
 
-        if !node.rest.is_empty() {
-            for r in node.rest.iter() {
-                let distance_squared = r.color.diff(needle);
-                best_candidate.visit(distance_squared.sqrt(), distance_squared, r.idx);
-            }
-            break;
-        }
-
-        // Recurse towards most likely candidate first to narrow best candidate's distance as soon as possible
-        if distance_squared < node.radius_squared {
-            if let Some(near) = &node.near {
-                vp_search_node(near, needle, best_candidate);
-            }
-            // The best node (final answer) may be just ouside the radius, but not farther than
-            // the best distance we know so far. The vp_search_node above should have narrowed
-            // best_candidate->distance, so this path is rarely taken.
-            if distance >= node.radius - best_candidate.distance {
-                if let Some(far) = &node.far {
-                    node = far;
-                    continue;
+        match node.inner {
+            NodeInner::Nodes { radius, radius_squared, ref near, ref far } => {
+                // Recurse towards most likely candidate first to narrow best candidate's distance as soon as possible
+                if distance_squared < radius_squared {
+                    vp_search_node(near, needle, best_candidate);
+                    // The best node (final answer) may be just ouside the radius, but not farther than
+                    // the best distance we know so far. The vp_search_node above should have narrowed
+                    // best_candidate->distance, so this path is rarely taken.
+                    if distance >= radius - best_candidate.distance {
+                        node = far;
+                        continue;
+                    }
+                } else {
+                    vp_search_node(far, needle, best_candidate);
+                    if distance <= radius + best_candidate.distance {
+                        node = near;
+                        continue;
+                    }
                 }
-            }
-        } else {
-            if let Some(far) = &node.far {
-                vp_search_node(far, needle, best_candidate);
-            }
-            if distance <= node.radius + best_candidate.distance {
-                if let Some(near) = &node.near {
-                    node = near;
-                    continue;
-                }
-            }
+                break;
+            },
+            NodeInner::Leaf { len: num, ref idxs, ref colors } => {
+                colors.iter().zip(idxs.iter().copied()).take(num as usize).for_each(|(color, idx)| {
+                    let distance_squared = color.diff(needle);
+                    best_candidate.visit(distance_squared.sqrt(), distance_squared, idx);
+                });
+                break;
+            },
         }
-        break;
     }
 }

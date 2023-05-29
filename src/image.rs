@@ -1,13 +1,14 @@
 use crate::attr::Attributes;
 use crate::blur::{liq_blur, liq_max3, liq_min3};
 use crate::error::*;
-use crate::pal::{MAX_COLORS, MIN_OPAQUE_A, PalF, RGBA, f_pixel, gamma_lut};
+use crate::pal::{f_pixel, PalF, PalIndexRemap, MAX_COLORS, MIN_OPAQUE_A, RGBA};
 use crate::remap::DitherMapMode;
 use crate::rows::{DynamicRows, PixelsSource};
+use crate::seacow::Pointer;
 use crate::seacow::RowBitmap;
 use crate::seacow::SeaCow;
+use crate::PushInCapacity;
 use crate::LIQ_HIGH_MEMORY_LIMIT;
-use fallible_collections::FallibleVec;
 use rgb::ComponentMap;
 use std::mem::MaybeUninit;
 
@@ -22,11 +23,10 @@ pub struct Image<'pixels> {
     pub(crate) edges: Option<Box<[u8]>>,
     pub(crate) dither_map: Option<Box<[u8]>>,
     pub(crate) background: Option<Box<Image<'pixels>>>,
-    pub(crate) fixed_colors: Vec<f_pixel>,
+    pub(crate) fixed_colors: Vec<RGBA>,
 }
 
 impl<'pixels> Image<'pixels> {
-
     /// Makes an image from RGBA pixels.
     ///
     /// See the [`rgb`] and [`bytemuck`](//lib.rs/bytemuck) crates for making `[RGBA]` slices from `[u8]` slices.
@@ -71,7 +71,7 @@ impl<'pixels> Image<'pixels> {
     }
 
     pub(crate) fn free_histogram_inputs(&mut self) {
-        self.importance_map = None;
+        // importance_map must stay for remapping, because remap performs kmeans on potentially-unimportant pixels
         self.px.free_histogram_inputs();
     }
 
@@ -123,21 +123,24 @@ impl<'pixels> Image<'pixels> {
         true
     }
 
-    pub(crate) fn update_dither_map(&mut self, remapped_image: &RowBitmap<'_, u8>, palette: &mut PalF) {
-        let width = self.width();
+    pub(crate) fn update_dither_map(&mut self, remapped_image: &RowBitmap<'_, PalIndexRemap>, palette: &PalF, uses_background: bool) -> Result<(), Error> {
+        if self.edges.is_none() {
+            self.contrast_maps()?;
+        }
         let mut edges = match self.edges.take() {
             Some(e) => e,
-            None => return,
+            None => return Ok(()),
         };
         let colors = palette.as_slice();
 
+        let width = self.width();
         let mut prev_row: Option<&[_]> = None;
         let mut rows = remapped_image.rows().zip(edges.chunks_exact_mut(width)).peekable();
         while let Some((this_row, edges)) = rows.next() {
             let mut lastpixel = this_row[0];
             let mut lastcol = 0;
             for (col, px) in this_row.iter().copied().enumerate().skip(1) {
-                if self.background.is_some() && (colors[px as usize]).a < MIN_OPAQUE_A {
+                if uses_background && (colors[px as usize]).a < MIN_OPAQUE_A {
                     // Transparency may or may not create an edge. When there's an explicit background set, assume no edge.
                     continue;
                 }
@@ -156,7 +159,7 @@ impl<'pixels> Image<'pixels> {
                         i += 1;
                     }
                     while lastcol <= col {
-                        edges[lastcol] = ((edges[lastcol] as u16 + 128) as f32
+                        edges[lastcol] = (f32::from(u16::from(edges[lastcol]) + 128)
                             * (255. / (255 + 128) as f32)
                             * (1. - 20. / (20 + neighbor_count) as f32))
                             as u8;
@@ -168,13 +171,18 @@ impl<'pixels> Image<'pixels> {
             prev_row = Some(this_row);
         }
         self.dither_map = Some(edges);
+        Ok(())
     }
 
     /// Set which pixels are more important (and more likely to get a palette entry)
     ///
     /// The map must be `width`×`height` pixels large. Higher numbers = more important.
     pub fn set_importance_map(&mut self, map: impl Into<Box<[u8]>>) -> Result<(), Error> {
-        self.importance_map = Some(map.into());
+        let map = map.into();
+        if map.len() != self.width() * self.height() {
+            return Err(BufferTooSmall);
+        }
+        self.importance_map = Some(map);
         Ok(())
     }
 
@@ -191,7 +199,6 @@ impl<'pixels> Image<'pixels> {
             return Err(BufferTooSmall);
         }
         self.background = Some(Box::new(background));
-        self.dither_map = None;
         Ok(())
     }
 
@@ -204,8 +211,8 @@ impl<'pixels> Image<'pixels> {
     /// Returns error if more than 256 colors are added. If image is quantized to fewer colors than the number of fixed colors added, then excess fixed colors will be ignored.
     pub fn add_fixed_color(&mut self, color: RGBA) -> Result<(), Error> {
         if self.fixed_colors.len() >= MAX_COLORS { return Err(Unsupported); }
-        let lut = gamma_lut(self.px.gamma);
-        self.fixed_colors.try_push(f_pixel::from_rgba(&lut, RGBA {r: color.r, g: color.g, b: color.b, a: color.a}))?;
+        self.fixed_colors.try_reserve(1)?;
+        self.fixed_colors.push_in_cap(color);
         Ok(())
     }
 
@@ -224,12 +231,12 @@ impl<'pixels> Image<'pixels> {
     }
 
     #[inline(always)]
-    pub(crate) fn gamma(&self) -> f64 {
-        self.px.gamma
+    pub(crate) fn gamma(&self) -> Option<f64> {
+        if self.px.gamma > 0. { Some(self.px.gamma) } else { None }
     }
 
     /// Builds two maps:
-    ///    importance_map - approximation of areas with high-frequency noise, except straight edges. 1=flat, 0=noisy.
+    ///    `importance_map` - approximation of areas with high-frequency noise, except straight edges. 1=flat, 0=noisy.
     ///    edges - noise map including all edges
     pub(crate) fn contrast_maps(&mut self) -> Result<(), Error> {
         let width = self.width();
@@ -329,13 +336,14 @@ impl<'pixels> Image<'pixels> {
             return Err(BufferTooSmall);
         }
 
-        let rows = SeaCow::boxed(slice.chunks(stride).map(|row| row.as_ptr()).take(height).collect());
+        let rows = SeaCow::boxed(slice.chunks(stride).map(|row| Pointer(row.as_ptr())).take(height).collect());
         Image::new_internal(attr, PixelsSource::Pixels { rows, pixels: Some(pixels) }, width as u32, height as u32, gamma)
     }
 }
 
 fn try_zero_vec(len: usize) -> Result<Vec<u8>, Error> {
-    let mut vec: Vec<_> = FallibleVec::try_with_capacity(len)?;
+    let mut vec = Vec::new();
+    vec.try_reserve_exact(len)?;
     vec.resize(len, 0);
     Ok(vec)
 }
